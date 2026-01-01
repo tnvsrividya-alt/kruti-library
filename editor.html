@@ -1,0 +1,2098 @@
+<!DOCTYPE html>
+<html lang="te">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Carnatic Kruti Editor</title>
+
+    <!-- Local Libraries (Downloaded for Offline) -->
+    <script src="libs/FileSaver.min.js"></script>
+    <script src="libs/html-docx.js"></script>
+
+    <script>
+        /* ===== ROBUST ITRANS-BASED PHONETIC ENGINE ===== */
+        (function () {
+            // 1. ITRANS MAPPINGS
+            // ==================
+
+            // Independent Vowels
+            const vowels = {
+                "a": "అ", "aa": "ఆ", "A": "ఆ",
+                "i": "ఇ", "ii": "ఈ", "I": "ఈ",
+                "u": "ఉ", "uu": "ఊ", "U": "ఊ",
+                "R": "ఋ", "RR": "ౠ",
+                "e": "ఎ", "E": "ఏ", // e=Short, E=Long
+                "ai": "ై",
+                "o": "ఒ", "O": "ఓ", // o=Short, O=Long
+                "au": "ౌ", "ou": "ౌ",
+                "M": "ం", // Anusvara
+                "H": "ః"  // Visarga
+            };
+
+            // Dependent Vowels (Matras) - Applied to consonants
+            const matras = {
+                "a": "", // Removes virama, adds nothing
+                "aa": "ా", "A": "ా",
+                "i": "ి", "ii": "ీ", "I": "ీ",
+                "u": "ు", "uu": "ూ", "U": "ూ",
+                "R": "ృ", "RR": "ౄ",
+                "e": "ె", "E": "ే", // e=Short, E=Long
+                "ai": "ై",
+                "o": "ొ", "O": "ో", // o=Short, O=Long
+                "au": "ౌ", "ou": "ౌ"
+            };
+
+            // Consonants (Always defined with Virama '్' implicitly in the output logic)
+            const consonants = {
+                // Guttural
+                "k": "క్", "kh": "ఖ్", "g": "గ్", "gh": "ఘ్", "G": "ఙ్", "ng": "ఙ్",
+
+                // Palatal
+                "c": "చ్", "ch": "చ్", "Ch": "ఛ్", "CH": "ఛ్",
+                "j": "జ్", "jh": "ఝ్", "J": "ఞ్", "wu": "ఞ్", // J usually Jnana
+
+                // Retroflex
+                "T": "ట్", "Th": "ఠ్", "D": "డ్", "Dh": "ఢ్", "N": "ణ్",
+
+                // Dental
+                "t": "త్", "th": "థ్", "d": "ద్", "dh": "ధ్", "n": "న్",
+
+                // Labial
+                "p": "ప్", "ph": "ఫ్", "f": "ఫ్", // f often maps to ph
+                "b": "బ్", "bh": "భ్", "m": "మ్",
+
+                // Semivowels / Liquida
+                "y": "య్", "r": "ర్", "l": "ల్", "L": "ళ్", "v": "వ్", "w": "వ్",
+
+                // Sibilants
+                "S": "శ్", // Shankara
+                "sh": "ష్", // Sha
+                "s": "స్", // Sa
+                "h": "హ్",
+
+                // Conjuncts/Others
+                "ks": "క్ష్", "ksh": "క్ష్", "x": "క్ష్",
+                "j~n": "జ్ఞ్", "Gy": "జ్ఞ్"
+            };
+
+            // Digit mapping
+            const digits = {
+                '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
+                '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉'
+            };
+
+            // Reverse Map for Lookup (Value -> Key)
+            const consonantsRev = {};
+            for (let k in consonants) {
+                let val = consonants[k];
+                if (!consonantsRev[val] || k.length < consonantsRev[val].length) {
+                    consonantsRev[val] = k;
+                }
+            }
+
+            // 2. HELPER FUNCTIONS
+            // ===================
+
+            // Convert single token (simple fallback)
+            function toTeluguSimple(char) {
+                if (digits[char]) return digits[char];
+                if (vowels[char]) return vowels[char];
+                if (consonants[char]) return consonants[char];
+                return char;
+            }
+
+            // 3. INPUT HANDLER
+            // ================
+
+            let isSmartMode = true;
+            let currentWordBuffer = ""; // Stores English chars for current word in Smart Mode
+            let suggestionDebounceTimer = null;
+
+            window.toggleSmartMode = function (cb) {
+                isSmartMode = cb.checked;
+                document.getElementById('teluguStatus').innerText = isSmartMode ? "Smart Mode Active" : "Strict Mode Active";
+                document.getElementById('teluguStatus').style.color = isSmartMode ? "blue" : "green";
+                currentWordBuffer = ""; // Reset buffer
+            };
+
+            // Replace the global handleInput function
+            function handleInput(e) {
+                // Only insert text
+                if (e.inputType !== 'insertText' || !e.data) return;
+
+                // Valid chars
+                if (!/^[a-zA-Z0-9]$/.test(e.data)) return;
+
+                const sel = window.getSelection();
+                if (!sel.rangeCount) return;
+                const range = sel.getRangeAt(0);
+                const node = range.startContainer;
+
+                // Logic Split:
+                if (isSmartMode) {
+                    // SMART MODE: We let English letters stay, then fetch word
+                    // But we need to handle "word boundaries"
+                    // If user types 's', we show 's'.
+                    // We trigger fetch.
+
+                    // Actually, to make it seamless, we just return here?
+                    // The browser inserts the char 's'.
+                    // Then we trigger the fetch logic.
+
+                    // SMART MODE: We let English letters stay.
+                    // We DO NOT fetch here. We wait for Space/Enter.
+                    return; // Just let browser insert char.
+                }
+
+                // STRICT MODE (Original ITRANS)
+                // Work on Text Nodes
+                if (node.nodeType === 3) {
+                    const text = node.textContent;
+                    const offset = range.startOffset; // Cursor AFTER inserted char
+
+                    const typedChar = text[offset - 1]; // The char we just typed
+                    const textBefore = text.substring(0, offset - 1);
+
+                    if (textBefore.length === 0) {
+                        // Start of line -> Just simple convert
+                        replaceChar(node, offset, toTeluguSimple(typedChar));
+                        return;
+                    }
+
+                    const prevChar = textBefore[textBefore.length - 1];
+                    const prevPrevChar = textBefore.length > 1 ? textBefore[textBefore.length - 2] : null;
+
+                    // --- A. CONSONANT UPGRADE (t + h -> th) ---
+                    // If prev was 'Virama' -> it "might" be a consonant ending in virama
+                    if (prevChar === '్' && prevPrevChar) {
+                        // Try to identify the consonant
+                        const fullConsonant = prevPrevChar + prevChar;
+
+                        if (consonantsRev[fullConsonant]) {
+                            const baseKey = consonantsRev[fullConsonant]; // e.g. 't'
+                            const newKey = baseKey + typedChar; // 'th'
+
+
+                            if (consonants[newKey]) {
+                                // UPGRADE!
+                                const newText = consonants[newKey];
+                                replaceRange(node, offset - 3, offset, newText);
+                                return;
+                            }
+                        }
+                    }
+
+                    // --- B. VOWEL / MATRA APPLICATION ---
+                    let isVowel = false;
+                    let matraVal = "";
+                    let vowelVal = "";
+
+                    // Is it a vowel key?
+                    if (vowels[typedChar] || matras[typedChar]) {
+                        isVowel = true;
+                        matraVal = matras[typedChar];
+                        vowelVal = vowels[typedChar]; // Independent form
+                    }
+
+                    if (isVowel) {
+                        // Context 1: After Virama -> Apply Matra
+                        if (prevChar === '్') {
+                            replaceRange(node, offset - 2, offset, matraVal || "");
+                            return;
+                        }
+
+                        // Context 2: After Matra -> Upgrade Matra (e.g. 'i' + 'i' -> 'ii')
+                        for (let k in matras) {
+                            if (matras[k] === prevChar) {
+                                const newKey = k + typedChar; // 'ii'
+                                if (matras[newKey]) {
+                                    replaceRange(node, offset - 2, offset, matras[newKey]);
+                                    return;
+                                }
+                            }
+                        }
+
+                        // Handle 'Implicit A' -> Upgrade
+                        if (typedChar.toLowerCase() === 'a') {
+                            replaceChar(node, offset, "ా");
+                            return;
+                        }
+                    }
+
+                    // --- C. INDEPENDENT VOWEL UPGRADE (a + a -> aa) ---
+                    for (let k in vowels) {
+                        if (vowels[k] === prevChar) {
+                            const newKey = k + typedChar;
+                            if (vowels[newKey]) {
+                                replaceRange(node, offset - 2, offset, vowels[newKey]);
+                                return;
+                            }
+                        }
+                    }
+
+                    // --- D. DIGITS / PUNCTUATION ---
+                    // User Requested: Don't convert numbers. Keep 1,2,3...
+                    /* 
+                    if (digits[typedChar]) {
+                        replaceChar(node, offset, digits[typedChar]);
+                        return;
+                    } 
+                    */
+
+                    // --- E. DEFAULT ---
+                    const simple = toTeluguSimple(typedChar);
+                    if (simple !== typedChar) {
+                        replaceChar(node, offset, simple);
+                    }
+                }
+            };
+
+            // Update global maps for reference (if needed by other parts)
+            window.vowels = vowels;
+            window.matras = matras;
+            window.consonants = consonants;
+            window.consonantsRev = consonantsRev; // Helper
+
+            // CARNATIC PRIORITY DICTIONARY
+            // Words that should be preferred over common dictionary words
+            const carnatic_priority = new Set([
+                'శంకర', 'శంకరాభరణ', 'శ్రీ', 'కల్యాణి', 'భైరవి', 'తోడి', 'సావేరి',
+                'రాగ', 'తాళ', 'రాగం', 'తాళం', 'పల్లవి', 'అనుపల్లవి', 'చరణం',
+                'కృతి', 'వర్ణం', 'స్వర', 'సాహిత్య', 'మయ',
+                'నట', 'గౌళ', 'ఆరభి', 'వరాళి', 'శ్రీరాగ'
+            ]);
+
+            // GOOGLE FETCH LOGIC
+            async function fetchGoogleSuggestion(word, textNode, start, end) {
+                try {
+                    // Request 5 suggestions (num=5)
+                    const url = `https://inputtools.google.com/request?text=${word}&itc=te-t-i0-und&num=5&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`;
+                    const res = await fetch(url);
+                    const data = await res.json();
+
+                    if (data && data[1] && data[1][0] && data[1][0][1]) {
+                        const candidates = data[1][0][1];
+                        let suggestion = candidates[0]; // Default to top result
+
+                        // Priority Scan
+                        for (let cand of candidates) {
+                            if (carnatic_priority.has(cand)) {
+                                suggestion = cand;
+                                break; // Found a high priority override
+                            }
+                        }
+
+                        // Check if user is still at the same position?
+                        // Ideally we only replace if text matches.
+                        const currentVal = textNode.textContent.substring(start, end);
+                        if (currentVal === word) {
+                            replaceRange(textNode, start, end, suggestion);
+                        }
+                    }
+                } catch (err) {
+                    // Offline or Error -> Do nothing (leave as English) OR fallback to ITRANS?
+                    // Leaving as English allows user to manually fix or toggle mode.
+                    console.log("Smart Fetch Failed", err);
+                }
+            }
+
+            console.log("Robust ITRANS Engine Loaded");
+
+
+            // Check if current element is inside a swara-line (for auto-spacing)
+            function isInSwaraLine(node) {
+                let el = node;
+                while (el) {
+                    if (el.classList && el.classList.contains('swara-line')) {
+                        return true;
+                    }
+                    el = el.parentElement;
+                }
+                return false;
+            }
+
+            // Add auto-space after COMPLETED Telugu character on swara-line
+            function addAutoSpace(node, insertedText) {
+                if (!isInSwaraLine(node)) return;
+
+                // Check if inserted text ends with virama (్) - incomplete consonant
+                if (insertedText && insertedText.endsWith('్')) {
+                    return; // Don't add space - character is incomplete
+                }
+
+                document.execCommand('insertText', false, ' ');
+            }
+
+            function wrapWithActiveStyles(text) {
+                // Check ACTUAL button states from DOM (buttons with style-active class)
+                const dotBtn = document.querySelector('.btn-group button[data-style="dot-a"].style-active, .btn-group button[data-style="dot-b"].style-active');
+                const underlineBtn = document.querySelector('.btn-group button[data-style="u-single"].style-active, .btn-group button[data-style="u-double"].style-active');
+
+                const activeDotStyle = dotBtn ? dotBtn.dataset.style : null;
+                const activeUnderlineStyle = underlineBtn ? underlineBtn.dataset.style : null;
+
+                if (!activeDotStyle && !activeUnderlineStyle) {
+                    // No styles - return plain text with style reset
+                    return '<span style="text-emphasis:none;text-decoration:none;">' + text + '</span>';
+                }
+
+                let classes = [];
+                if (activeDotStyle) classes.push(activeDotStyle);
+                if (activeUnderlineStyle) classes.push(activeUnderlineStyle);
+                return '<span class="' + classes.join(' ') + '">' + text + '</span>';
+            }
+
+            function replaceChar(node, offset, newText) {
+                const text = node.textContent;
+                const before = text.substring(0, offset - 1);
+                const after = text.substring(offset);
+
+                // Get current style settings
+                const dotBtn = document.querySelector('.btn-group button[data-style="dot-a"].style-active, .btn-group button[data-style="dot-b"].style-active');
+                const underlineBtn = document.querySelector('.btn-group button[data-style="u-single"].style-active, .btn-group button[data-style="u-double"].style-active');
+                const activeDotStyle = dotBtn ? dotBtn.dataset.style : null;
+                const activeUnderlineStyle = underlineBtn ? underlineBtn.dataset.style : null;
+
+                // Check if current node's parent span has matching styles
+                const parentSpan = node.parentElement;
+
+                // If we're in a span with matching styles, just modify the text content directly
+                if (parentSpan && parentSpan.tagName === 'SPAN') {
+                    const hasMatchingDot = activeDotStyle ? parentSpan.classList.contains(activeDotStyle) :
+                        (!parentSpan.classList.contains('dot-a') && !parentSpan.classList.contains('dot-b'));
+                    const hasMatchingUnderline = activeUnderlineStyle ? parentSpan.classList.contains(activeUnderlineStyle) :
+                        (!parentSpan.classList.contains('u-single') && !parentSpan.classList.contains('u-double'));
+
+                    if (hasMatchingDot && hasMatchingUnderline) {
+                        // Styles match - just update text content
+                        node.textContent = before + newText + after;
+                        setCursor(node, before.length + newText.length);
+                        addAutoSpace(node, newText);
+                        return;
+                    }
+                }
+
+                // Styles don't match or no parent span - use insertHTML
+                node.textContent = before + after;
+                setCursor(node, before.length);
+                document.execCommand('insertHTML', false, wrapWithActiveStyles(newText));
+                addAutoSpace(node, newText);
+            }
+
+            function replaceRange(node, start, end, newText) {
+                const text = node.textContent;
+                const before = text.substring(0, start);
+                const after = text.substring(end);
+
+                // Get current style settings
+                const dotBtn = document.querySelector('.btn-group button[data-style="dot-a"].style-active, .btn-group button[data-style="dot-b"].style-active');
+                const underlineBtn = document.querySelector('.btn-group button[data-style="u-single"].style-active, .btn-group button[data-style="u-double"].style-active');
+                const activeDotStyle = dotBtn ? dotBtn.dataset.style : null;
+                const activeUnderlineStyle = underlineBtn ? underlineBtn.dataset.style : null;
+
+                // Check if current node's parent span has matching styles
+                const parentSpan = node.parentElement;
+
+                if (parentSpan && parentSpan.tagName === 'SPAN') {
+                    const hasMatchingDot = activeDotStyle ? parentSpan.classList.contains(activeDotStyle) :
+                        (!parentSpan.classList.contains('dot-a') && !parentSpan.classList.contains('dot-b'));
+                    const hasMatchingUnderline = activeUnderlineStyle ? parentSpan.classList.contains(activeUnderlineStyle) :
+                        (!parentSpan.classList.contains('u-single') && !parentSpan.classList.contains('u-double'));
+
+                    if (hasMatchingDot && hasMatchingUnderline) {
+                        // Styles match - just update text content
+                        node.textContent = before + newText + after;
+                        setCursor(node, before.length + newText.length);
+                        addAutoSpace(node, newText);
+                        return;
+                    }
+                }
+
+                // Styles don't match - use insertHTML
+                node.textContent = before + after;
+                setCursor(node, before.length);
+                document.execCommand('insertHTML', false, wrapWithActiveStyles(newText));
+                addAutoSpace(node, newText);
+            }
+
+            function setCursor(node, pos) {
+                const sel = window.getSelection();
+                const range = document.createRange();
+                range.setStart(node, pos);
+                range.setEnd(node, pos);
+                sel.removeAllRanges();
+                sel.addRange(range);
+            }
+
+            // Attach listener to 'sheet' for delegation
+            function attachListener() {
+                const sheet = document.getElementById('sheet');
+                if (sheet) {
+                    console.log("Attaching input listener to sheet");
+                    sheet.removeEventListener('input', handleInput);
+                    sheet.addEventListener('input', handleInput);
+                } else {
+                    console.error("Sheet element not found for listener attachment");
+                }
+            }
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', attachListener);
+            } else {
+                attachListener();
+            }
+            // Exposed for compatibility if needed, but we use toTelugu direct
+            window.toTelugu = toTeluguSimple;
+
+            /* ===== ARROW KEY VERTICAL NAVIGATION ===== */
+            let navigationX = null; // Sticky stick column X position
+
+            document.addEventListener('keydown', function (e) {
+                if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') {
+                    navigationX = null; // Reset on other keys
+                    return;
+                }
+
+                const sel = window.getSelection();
+                if (!sel || sel.rangeCount === 0) return;
+
+                const range = sel.getRangeAt(0);
+                const node = range.startContainer;
+
+                // Find if we're in a swara-line or sahitya-line
+                let currentLine = node;
+                while (currentLine && (!currentLine.classList ||
+                    (!currentLine.classList.contains('swara-line') &&
+                        !currentLine.classList.contains('sahitya-line')))) {
+                    currentLine = currentLine.parentElement;
+                }
+
+                if (!currentLine) return; // Not in a line we care about
+
+                const isSwara = currentLine.classList.contains('swara-line');
+                const isSahitya = currentLine.classList.contains('sahitya-line');
+
+                // Find the row-group containing this line
+                const rowGroup = currentLine.closest('.row-group');
+                if (!rowGroup) return;
+
+                let targetLine = null;
+                const nextGroup = rowGroup.nextElementSibling;
+                const prevGroup = rowGroup.previousElementSibling;
+
+                // 1. Determine Target Line
+                if (e.key === 'ArrowDown') {
+                    if (isSwara) {
+                        // Try same group Sahitya
+                        targetLine = rowGroup.querySelector('.sahitya-line');
+                        if (!targetLine) {
+                            // If no Sahitya (Chitta), go to Next Group Swara
+                            if (nextGroup && nextGroup.classList.contains('row-group')) {
+                                targetLine = nextGroup.querySelector('.swara-line');
+                            }
+                        }
+                    } else if (isSahitya) {
+                        // Go to Next Group Swara
+                        if (nextGroup && nextGroup.classList.contains('row-group')) {
+                            targetLine = nextGroup.querySelector('.swara-line');
+                        }
+                    }
+                } else if (e.key === 'ArrowUp') {
+                    if (isSahitya) {
+                        // Go to Same Group Swara
+                        targetLine = rowGroup.querySelector('.swara-line');
+                    } else if (isSwara) {
+                        // Go to Prev Group Sahitya, else Prev Group Swara
+                        if (prevGroup && prevGroup.classList.contains('row-group')) {
+                            targetLine = prevGroup.querySelector('.sahitya-line');
+                            if (!targetLine) {
+                                targetLine = prevGroup.querySelector('.swara-line');
+                            }
+                        }
+                    }
+                }
+
+                if (!targetLine) return; // No target line found
+
+                // 2. Manage Sticky Column (navigationX)
+                // If we don't have a sticky X yet, store the current one
+                if (navigationX === null) {
+                    const cursorRect = range.getBoundingClientRect();
+                    navigationX = cursorRect.left;
+                }
+
+                // 3. Move Logic
+                targetLine.focus();
+
+                const targetText = targetLine.textContent || '';
+                const targetRange = document.createRange();
+
+                if (targetText.length === 0) {
+                    // Empty line: Place at start BUT keep navigationX for next move
+                    targetRange.selectNodeContents(targetLine);
+                    targetRange.collapse(true);
+                } else {
+                    // Non-empty: Try to match navigationX
+                    let closestOffset = 0;
+                    let closestDistance = Infinity;
+
+                    const walker = document.createTreeWalker(targetLine, NodeFilter.SHOW_TEXT, null, false);
+                    let textNode;
+                    while (textNode = walker.nextNode()) {
+                        for (let i = 0; i <= textNode.length; i++) {
+                            const testRange = document.createRange();
+                            testRange.setStart(textNode, i);
+                            testRange.collapse(true);
+                            const testRect = testRange.getBoundingClientRect();
+                            const distance = Math.abs(testRect.left - navigationX); // Use Sticky X
+
+                            if (distance < closestDistance) {
+                                closestDistance = distance;
+                                targetRange.setStart(textNode, i);
+                                targetRange.collapse(true);
+                            }
+                        }
+                    }
+                }
+
+                sel.removeAllRanges();
+                sel.addRange(targetRange);
+
+                e.preventDefault();
+            });
+
+            // Click listener to reset sticky column
+            document.addEventListener('mousedown', function () {
+                navigationX = null;
+            });
+
+            // NEW: Smart Mode "Commit on Space" Handler
+            document.addEventListener('keydown', async function (e) {
+                if (!isSmartMode) return;
+
+                // Trigger on Space (Code 32)
+                if (e.key === ' ' || e.code === 'Space') {
+                    const sel = window.getSelection();
+                    if (!sel.rangeCount) return;
+                    const range = sel.getRangeAt(0);
+                    const node = range.startContainer;
+
+                    if (node.nodeType === 3) {
+                        const text = node.textContent;
+                        const offset = range.startOffset;
+
+                        // Find word before cursor (Exclude digits)
+                        let start = offset;
+                        // Look back for non-word char (Only alphabets)
+                        while (start > 0 && /[a-zA-Z]/.test(text[start - 1])) {
+                            start--;
+                        }
+
+                        // If we found a word
+                        if (start < offset) {
+                            const word = text.substring(start, offset);
+
+                            // Prevent default Space insertion temporarily (to avoid flicker or logic mess)?
+                            // No, let's PREVENT default, fetch, replace, THEN insert space.
+                            e.preventDefault();
+
+                            try {
+                                // Request 5 suggestions
+                                const url = `https://inputtools.google.com/request?text=${word}&itc=te-t-i0-und&num=5&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`;
+                                const res = await fetch(url);
+                                const data = await res.json();
+
+                                let replacement = word; // Default to English if fail
+                                if (data && data[1] && data[1][0] && data[1][0][1]) {
+                                    const candidates = data[1][0][1];
+                                    replacement = candidates[0];
+
+                                    // Priority Scan (Shared constant would be better but simple scope is fine here, assuming access)
+                                    // Actually we need to access 'carnatic_priority' from the other scope or redefine it?
+                                    // Since it's inside the IIFE, and this listener is too?
+                                    // Wait, the listener is inside the IIFE?
+                                    // Let's check context.
+                                    // Yes, lines 580+ seem to be in the IIFE based on indentation.
+                                    // Note: we can't see the closing braces easily in view, but assuming they share closure.
+                                    // If 'carnatic_priority' is defined in the IIFE scope (handled in Chunk 1), we can use it here.
+
+                                    if (typeof carnatic_priority !== 'undefined') {
+                                        for (let cand of candidates) {
+                                            if (carnatic_priority.has(cand)) {
+                                                replacement = cand;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Replace the word
+                                replaceRange(node, start, offset, replacement);
+
+                                // Insert the space usually intended
+                                document.execCommand('insertText', false, ' ');
+
+                                // Reset Status if it was error
+                                const statusEl = document.getElementById('teluguStatus');
+                                if (statusEl.style.color === 'red') {
+                                    statusEl.innerText = "Smart Mode Active";
+                                    statusEl.style.color = "blue";
+                                }
+
+                            } catch (err) {
+                                console.error("Smart Fetch Error", err);
+                                // Show Indicator
+                                const statusEl = document.getElementById('teluguStatus');
+                                statusEl.innerText = "API Error (Retrying...)";
+                                statusEl.style.color = "red";
+
+                                // Fallback: Insert space, keep English word (Visual feedback of failure)
+                                document.execCommand('insertText', false, ' ');
+                            }
+                        }
+                    }
+                }
+
+                // TRIGGER SUGGESTION POPUP (Ctrl + Space)
+                if (e.ctrlKey && e.code === 'Space') {
+                    // Similar word-finding logic
+                    const sel = window.getSelection();
+                    if (!sel.rangeCount) return;
+                    const range = sel.getRangeAt(0);
+                    const node = range.startContainer;
+
+                    if (node.nodeType === 3) {
+                        const text = node.textContent;
+                        const offset = range.startOffset;
+
+                        // Find word before cursor (Exclude digits)
+                        let start = offset;
+                        while (start > 0 && /[a-zA-Z]/.test(text[start - 1])) {
+                            start--;
+                        }
+
+                        // If word found
+                        if (start < offset) {
+                            const word = text.substring(start, offset);
+                            showSuggestionPopup(word, node, start, offset, range);
+                        }
+                    }
+                }
+            });
+
+            // SUGGESTION POPUP LOGIC
+            async function showSuggestionPopup(word, textNode, start, end, range) {
+                const popup = document.getElementById('suggestionPopup');
+                popup.innerHTML = '<div style="padding:10px; color:gray;">Loading...</div>';
+
+                // Position popup
+                const rect = range.getBoundingClientRect();
+                popup.style.left = rect.left + 'px';
+                popup.style.top = (rect.bottom + window.scrollY + 5) + 'px'; // +5px buffer
+                popup.style.display = 'block';
+
+                try {
+                    const url = `https://inputtools.google.com/request?text=${word}&itc=te-t-i0-und&num=5&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`;
+                    const res = await fetch(url);
+                    const data = await res.json();
+
+                    popup.innerHTML = ''; // Clear loading
+
+                    if (data && data[1] && data[1][0] && data[1][0][1]) {
+                        const candidates = data[1][0][1];
+
+                        candidates.forEach(cand => {
+                            const item = document.createElement('div');
+                            item.className = 'suggestion-item';
+                            item.innerText = cand;
+                            item.onclick = function () {
+                                // Select this option
+                                replaceRange(textNode, start, end, cand);
+                                popup.style.display = 'none';
+                            };
+                            popup.appendChild(item);
+                        });
+                    } else {
+                        popup.innerHTML = '<div style="padding:10px; color:red;">No suggestions</div>';
+                    }
+
+                } catch (err) {
+                    console.error("Popup Fetch Error", err);
+                    popup.innerHTML = '<div style="padding:10px; color:red;">Error</div>';
+                }
+            }
+
+            // Close popup on outside click
+            document.addEventListener('mousedown', function (e) {
+                const popup = document.getElementById('suggestionPopup');
+                if (popup.style.display === 'block' && !popup.contains(e.target)) {
+                    popup.style.display = 'none';
+                }
+            });
+
+
+        })();
+    </script>
+
+    <style>
+        body {
+            margin: 0;
+            background: #f3f6fb;
+            font-family: "Noto Serif Telugu", serif;
+            color: #000;
+        }
+
+        /* Toolbar */
+        .toolbar {
+            position: sticky;
+            top: 10px;
+            margin: 12px auto;
+            width: 90%;
+            background: #fff;
+            padding: 10px;
+            border-radius: 12px;
+            display: flex;
+            gap: 10px;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+            z-index: 1000;
+        }
+
+        .toolbar button {
+            padding: 6px 12px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            background: #fff;
+            cursor: pointer;
+        }
+
+        /* Sheet */
+        .sheet {
+            background: #fff;
+            width: 900px;
+            margin: 20px auto;
+            padding: 40px 50px;
+            box-shadow: 0 0 0 1px #e5e7eb;
+        }
+
+        /* Title */
+        .title {
+            text-align: center;
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            outline: none;
+        }
+
+        .composer {
+            text-align: right;
+            font-size: 16px;
+            font-weight: bold;
+            color: #444;
+            margin-bottom: 20px;
+            margin-right: 10px;
+            /* Align with grid */
+            margin-left: auto;
+            /* Push to right flex-wise if needed, but text-align works */
+            outline: none;
+
+            /* Box Styling */
+            min-width: 250px;
+            /* Or block with text-align right? Parent flow is block */
+            /* Actually, div is block. Text-align right applies to content. 
+               But 'border' will wrap full width if block. 
+               We want a box on the right. */
+
+            /* Better Layout for "Box on Right" */
+            display: block;
+            width: fit-content;
+            margin-left: auto;
+            /* Pushes box to right */
+
+            border: 1px solid #ccc;
+            padding: 5px 10px;
+            border-radius: 4px;
+            background: #fff;
+        }
+
+        .composer:empty::before {
+            content: "వాగ్గేయకారులు";
+            color: #999;
+            font-style: italic;
+        }
+
+        .composer:focus {
+            border-color: #2196F3;
+        }
+
+        /* Metadata Grid */
+        .meta-grid {
+            display: flex;
+            justify-content: space-between;
+            width: 90%;
+            margin: 20px auto;
+            font-size: 16px;
+        }
+
+        .meta-col {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: 45%;
+        }
+
+        .meta-row {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .meta-label {
+            font-weight: bold;
+            color: #444;
+        }
+
+        .meta-val {
+            border-bottom: 1px dotted #000;
+            flex-grow: 1;
+            margin-left: 10px;
+            outline: none;
+            min-width: 50px;
+        }
+
+        /* Button Groups in Toolbar */
+        .btn-group {
+            display: inline-flex;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-right: 8px;
+            background: #f5f5f5;
+        }
+
+        .btn-group button {
+            border: none;
+            border-right: 1px solid #ccc;
+            background: transparent;
+            padding: 4px 8px;
+            cursor: pointer;
+        }
+
+        .btn-group button:last-child {
+            border-right: none;
+        }
+
+        .btn-group button:hover {
+            background: #e0e0e0;
+        }
+
+        .btn-group button.style-active {
+            background: #2196F3;
+            color: white;
+        }
+
+        /* Section header */
+        /* Section header */
+        .section-header {
+            margin-top: 45px;
+            /* Increased margin */
+            padding: 6px 10px;
+            background: #e5e7eb;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .section-header span[contenteditable] {
+            outline: none;
+            cursor: text;
+            min-width: 100px;
+            /* clickable area */
+        }
+
+        .section-header span[contenteditable]:empty::before {
+            content: "Header Name";
+            color: #888;
+            font-weight: normal;
+        }
+
+        /* Rows */
+        /* Single Line Layout */
+        .tala-row {
+            display: block;
+            /* No more grid */
+            position: relative;
+            margin-bottom: 5px;
+            border-bottom: 1px dashed #eee;
+        }
+
+        .swara-line,
+        .sahitya-line {
+            width: 100%;
+            min-height: 32px;
+            padding: 4px;
+            /* Padding for text */
+            padding-left: 2px;
+            outline: none;
+            white-space: pre-wrap;
+            word-break: break-word;
+            position: relative;
+            font-size: 18px;
+            line-height: 2;
+            letter-spacing: 1px;
+        }
+
+        .sahitya-line {
+            font-size: 16px;
+            color: #444;
+        }
+
+        /* Background Guides (Bars) using Gradients */
+        /* Adi 8: Bars at 4 (50%) and 6 (75%) */
+        .bg-adi-8 {
+            background-image:
+                linear-gradient(to right, transparent 49.8%, #000 50%, transparent 50.2%),
+                linear-gradient(to right, transparent 74.8%, #000 75%, transparent 75.2%);
+            background-repeat: no-repeat;
+        }
+
+        /* Adi 16: Bars at 8 (50%) and 12 (75%) */
+        .bg-adi-16 {
+            background-image:
+                linear-gradient(to right, transparent 49.9%, #000 50%, transparent 50.1%),
+                linear-gradient(to right, transparent 74.9%, #000 75%, transparent 75.1%);
+        }
+
+        /* Rupaka (3): Usually just end bar. User asked for single line. 
+           If splitting is needed: 1/3, 2/3? Or just open. 
+           Let's leave open or add if specifically requested. 
+           Previous code had bar after 3 (End).
+        */
+
+        /* Khanda 5: Bar after 2 (2/5 = 40%) */
+        .bg-khanda-5 {
+            background-image:
+                linear-gradient(to right, transparent 39.8%, #000 40%, transparent 40.2%);
+        }
+
+        /* Khanda 10: Bar after 4 (40%) */
+        .bg-khanda-10 {
+            background-image:
+                linear-gradient(to right, transparent 39.9%, #000 40%, transparent 40.1%);
+        }
+
+        /* Misra 7: Bar after 3 (3/7 = 42.85%) */
+        .bg-misra-7 {
+            background-image:
+                linear-gradient(to right, transparent 42.7%, #000 42.85%, transparent 43%);
+        }
+
+        /* Misra 14: Bar after 6 (42.85%) */
+        .bg-misra-14 {
+            background-image:
+                linear-gradient(to right, transparent 42.7%, #000 42.85%, transparent 43%);
+        }
+
+        .num-box {
+            text-align: center;
+            padding: 2px;
+            outline: none;
+            border: 1px solid #ccc;
+            /* Visible when empty or focused */
+            background: #fff;
+            font-size: 14px;
+            width: 28px;
+            margin-right: 4px;
+            border-radius: 4px;
+            position: relative;
+            /* For delete button positioning if needed */
+        }
+
+        .num-box:focus {
+            border-color: #666;
+        }
+
+        .num-box:not(:empty) {
+            border-color: transparent;
+            background: transparent;
+        }
+
+        .num-box.deleted {
+            border-color: transparent !important;
+            background: transparent !important;
+        }
+
+        .num-box.deleted:focus {
+            border-color: #666 !important;
+        }
+
+        /* Restore on focus */
+        /* Delete buttons */
+        .del-btn {
+            font-size: 12px;
+            color: red;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-weight: bold;
+            opacity: 0;
+            /* Hidden by default */
+            margin-right: 2px;
+            transition: opacity 0.2s;
+        }
+
+        .del-btn:hover {
+            opacity: 1;
+        }
+
+        .section-header:hover .del-btn,
+        .row-group:hover .del-btn {
+            opacity: 1;
+        }
+
+        .section-header .del-btn {
+            float: right;
+            font-size: 16px;
+            color: #999;
+        }
+
+        .section-header .del-btn:hover {
+            color: red;
+        }
+
+        /* Styles for marking */
+        .u-single {
+            border-bottom: 1px solid #000;
+            padding-bottom: 3px;
+            /* Move line down */
+            line-height: 1.5;
+            /* Ensure space for dots */
+            display: inline-block;
+        }
+
+        .u-double {
+            border-bottom: 4px double #000;
+            /* Increased width to create gap */
+            padding-bottom: 2px;
+            line-height: 1.5;
+            display: inline-block;
+        }
+
+        /* Dots using text-emphasis (Cleaner, no Unicode issues) */
+        .dot-a {
+            -webkit-text-emphasis: filled circle #000;
+            text-emphasis: filled circle #000;
+            -webkit-text-emphasis-position: over right;
+            /* Adjusts placement */
+            text-emphasis-position: over right;
+        }
+
+        .dot-b {
+            -webkit-text-emphasis: filled circle #000;
+            text-emphasis: filled circle #000;
+            -webkit-text-emphasis-position: under right;
+            text-emphasis-position: under right;
+        }
+
+        /* Better than plain underline */
+        .swara-cell,
+        .sahitya-cell {
+            min-height: 28px;
+            padding: 4px;
+            outline: none;
+            white-space: pre-wrap;
+            /* Allow wrapping */
+            word-break: break-word;
+            position: relative;
+            letter-spacing: 1.5px;
+            /* Increased letter spacing */
+            line-height: 1.8;
+            /* More breathability */
+        }
+
+        /* Tala bars (swara only) */
+        .bar-single::after {
+            content: "";
+            position: absolute;
+            right: -6px;
+            top: 50%;
+            height: 16px;
+            width: 2px;
+            background: #000;
+            transform: translateY(-50%);
+        }
+
+        .bar-double::before,
+        .bar-double::after {
+            content: "";
+            position: absolute;
+            top: 50%;
+            height: 16px;
+            width: 2px;
+            background: #000;
+            transform: translateY(-50%);
+        }
+
+        .bar-double::before {
+            right: -10px;
+        }
+
+        .bar-double::after {
+            right: -6px;
+        }
+
+        /* Error state for invalid timing */
+        .error {
+            background-color: #ffe6e6 !important;
+            /* Light Red */
+            box-shadow: inset 0 0 0 1px red;
+        }
+
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6);
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-content {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            width: 300px;
+            text-align: center;
+            font-family: 'Noto Serif Telugu', serif;
+        }
+
+        .radio-group {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            margin: 15px 0;
+        }
+
+        .radio-group label {
+            margin: 5px 0;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        .modal-content button {
+            padding: 8px 16px;
+            background: #4a90e2;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        /* Suggestion Popup */
+        #suggestionPopup {
+            position: absolute;
+            display: none;
+            background: white;
+            border: 1px solid #999;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 10000;
+            min-width: 120px;
+            border-radius: 4px;
+            overflow: hidden;
+            font-family: 'Mallanna', sans-serif;
+        }
+
+        .suggestion-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 16px;
+        }
+
+        .suggestion-item:last-child {
+            border-bottom: none;
+        }
+
+        .suggestion-item:hover {
+            background-color: #e6f7ff;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="toolbar">
+        <!-- Dots Group -->
+        <span class="btn-group" title="Dot (select one)">
+            <button onclick="handleStyleButtonClick('dot-a', this)" data-style="dot-a"
+                title="Dot Above (Tara)">Ṡ</button>
+            <button onclick="handleStyleButtonClick('dot-b', this)" data-style="dot-b"
+                title="Dot Below (Mandra)">Ṣ</button>
+        </span>
+
+        <!-- Underlines Group -->
+        <span class="btn-group" title="Underline (select one)">
+            <button onclick="handleStyleButtonClick('u-single', this)" data-style="u-single"
+                title="Single Underline">S̲</button>
+            <button onclick="handleStyleButtonClick('u-double', this)" data-style="u-double"
+                title="Double Underline">S̳</button>
+        </span>
+
+        <span style="border-right:1px solid #ccc; margin:0 4px;"></span>
+
+        <button onclick="addSection('పల్లవి')">+ పల్లవి</button>
+        <button onclick="addSection('అనుపల్లవి')">+ అనుపల్లవి</button>
+        <button onclick="addSection('చరణం')">+ చరణం</button>
+
+        <button onclick="addSection('చిట్టస్వరం', 'chitta')" title="Add Chitta Swaram (Swaram only)">+
+            చిట్టస్వరం</button>
+
+        <button onclick="addSection('', 'custom')" title="Add Custom Header (Sahithyam)">+ సాహిత్యం</button>
+
+        <button onclick="addRow()">Add Row</button>
+        <button onclick="addRow()">Add Row</button>
+        <button onclick="downloadDoc()">Download Doc</button>
+
+        <label style="display:inline-flex; align-items:center; margin-left:10px; font-size:12px; cursor:pointer;"
+            title="Use Google for smarter suggestions (Requires Internet)">
+            <input type="checkbox" id="smartModeToggle" checked onchange="toggleSmartMode(this)">
+            <span style="margin-left:4px;">Smart Mode (Google)</span>
+        </label>
+
+        <span id="teluguStatus" style="font-size:12px; color:green; margin-left:10px;">Telugu Active</span>
+    </div>
+
+    <div class="sheet" id="sheet">
+
+        <div class="title" contenteditable onfocus="if(this.innerText.trim()==='కృతి శీర్షిక') this.innerText=''">కృతి
+            శీర్షిక</div>
+
+        <div class="composer" contenteditable></div>
+
+        <div class="meta-grid">
+            <div class="meta-col">
+                <div class="meta-row">
+                    <span class="meta-label">రాగం:</span>
+                    <span class="meta-val" contenteditable></span>
+                </div>
+                <div class="meta-row">
+                    <span class="meta-label">తాళం:</span>
+                    <span class="meta-val" contenteditable></span>
+                </div>
+            </div>
+            <div class="meta-col">
+                <div class="meta-row">
+                    <span class="meta-label">ఆరోహణ:</span>
+                    <span class="meta-val" contenteditable></span>
+                </div>
+                <div class="meta-row">
+                    <span class="meta-label">అవరోహణ:</span>
+                    <span class="meta-val" contenteditable></span>
+                </div>
+            </div>
+        </div>
+        <div id="talaModal" class="modal">
+            <div class="modal-content">
+                <h3>Select Talam</h3>
+                <div class="radio-group">
+                    <label><input type="radio" name="tala" value="8" checked> Adi Talam (8)</label>
+                    <label><input type="radio" name="tala" value="16"> Adi Talam (16)</label>
+                    <label><input type="radio" name="tala" value="3"> Roopaka Talam (3)</label>
+                    <label><input type="radio" name="tala" value="6"> Roopaka Talam (6)</label>
+                    <label><input type="radio" name="tala" value="5"> Khanda Chapu (5)</label>
+                    <label><input type="radio" name="tala" value="10"> Khanda Chapu (10)</label>
+                    <label><input type="radio" name="tala" value="7"> Misra Chapu (7)</label>
+                    <label><input type="radio" name="tala" value="14"> Misra Chapu (14)</label>
+                </div>
+                <button onclick="confirmTala()">Select</button>
+            </div>
+        </div>
+
+        <!-- Suggestion Popup -->
+        <div id="suggestionPopup"></div>
+
+        <div id="content"></div>
+    </div>
+
+    <script>
+        function confirmTala() {
+            const radios = document.getElementsByName('tala');
+            let val = null;
+            for (const r of radios) {
+                if (r.checked) {
+                    val = parseInt(r.value);
+                    break;
+                }
+            }
+            if (val) {
+                globalParts = val;
+                document.getElementById('talaModal').style.display = 'none';
+                if (pendingSectionData) {
+                    addSection(pendingSectionData.name, pendingSectionData.type);
+                    pendingSectionData = null;
+                }
+            }
+        }
+
+        /* ===== GLOBAL TELUGU INPUT ===== */
+
+
+
+        function placeCursor(el) {
+            const r = document.createRange();
+            r.selectNodeContents(el);
+            r.collapse(false);
+            const s = window.getSelection();
+            s.removeAllRanges();
+            s.addRange(r);
+        }
+
+        /* ===== Sections & Rows ===== */
+        let activeSection = null;
+        let globalParts = null;
+        let pendingSectionData = null; // Store data while waiting for Modal
+
+        /* ===== STYLE TOGGLE STATE ===== */
+        window.activeDot = null;       // 'dot-a' or 'dot-b' or null
+        window.activeUnderline = null; // 'u-single' or 'u-double' or null
+
+        function toggleStyleMode(styleName, btn) {
+            const dotStyles = ['dot-a', 'dot-b'];
+            const underlineStyles = ['u-single', 'u-double'];
+
+            if (dotStyles.includes(styleName)) {
+                // Handle dot group
+                if (window.activeDot === styleName) {
+                    // Deselect
+                    window.activeDot = null;
+                    btn.classList.remove('style-active');
+                } else {
+                    // Select this, deselect other
+                    document.querySelectorAll('.btn-group button').forEach(b => {
+                        if (dotStyles.some(s => b.dataset.style === s)) {
+                            b.classList.remove('style-active');
+                        }
+                    });
+                    window.activeDot = styleName;
+                    btn.classList.add('style-active');
+                }
+            } else if (underlineStyles.includes(styleName)) {
+                // Handle underline group
+                if (window.activeUnderline === styleName) {
+                    // Deselect
+                    window.activeUnderline = null;
+                    btn.classList.remove('style-active');
+                } else {
+                    // Select this, deselect other
+                    document.querySelectorAll('.btn-group button').forEach(b => {
+                        if (underlineStyles.some(s => b.dataset.style === s)) {
+                            b.classList.remove('style-active');
+                        }
+                    });
+                    window.activeUnderline = styleName;
+                    btn.classList.add('style-active');
+                }
+            }
+        }
+
+
+
+        /* ===== SELECTION-BASED STYLE DETECTION ===== */
+
+        // Listen for selection changes
+        document.addEventListener('selectionchange', function () {
+            updateButtonsFromSelection();
+        });
+
+        function updateButtonsFromSelection() {
+            const sel = window.getSelection();
+            if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+                // No selection - keep buttons as they are (for typing mode)
+                return;
+            }
+
+            // Get all styled spans within the selection
+            const range = sel.getRangeAt(0);
+            const container = range.commonAncestorContainer;
+
+            // Find all text nodes in selection
+            let styles = { dot: null, underline: null, hasMixed: false };
+
+            // Check if selection is within a styled span or spans
+            const selectedSpans = [];
+
+            // Walk through the selection to find styled spans
+            const walker = document.createTreeWalker(
+                container.nodeType === 3 ? container.parentElement : container,
+                NodeFilter.SHOW_ELEMENT,
+                { acceptNode: (node) => node.tagName === 'SPAN' ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP }
+            );
+
+            let node;
+            while (node = walker.nextNode()) {
+                if (sel.containsNode(node, true)) {
+                    selectedSpans.push(node);
+                }
+            }
+
+            // If cursor is inside a single span (no full selection)
+            if (selectedSpans.length === 0) {
+                let el = sel.anchorNode;
+                if (el && el.nodeType === 3) el = el.parentElement;
+                if (el && el.tagName === 'SPAN') {
+                    selectedSpans.push(el);
+                }
+            }
+
+            if (selectedSpans.length === 0) {
+                // No styled spans - clear highlights
+                clearStyleButtonHighlights();
+
+                // NEW: Check if we are in Sahitya line. If so, DISABLE buttons
+                let isInSahitya = false;
+                let tmp = sel.anchorNode;
+                // Move up to find .sahitya-line
+                while (tmp && tmp.classList && tmp.id !== 'sheet') {
+                    if (tmp.classList.contains('sahitya-line')) {
+                        isInSahitya = true;
+                        break;
+                    }
+                    tmp = tmp.parentElement;
+                }
+                // Also check if text node's parent is sahitya line
+                if (!isInSahitya && sel.anchorNode && sel.anchorNode.nodeType === 3) {
+                    let p = sel.anchorNode.parentElement;
+                    while (p && p.id !== 'sheet') {
+                        if (p.classList.contains('sahitya-line')) {
+                            isInSahitya = true;
+                            break;
+                        }
+                        p = p.parentElement;
+                    }
+                }
+
+                // If in Sahitya -> Disable Buttons
+                const allStyleBtns = document.querySelectorAll('.btn-group button');
+                if (isInSahitya) {
+                    allStyleBtns.forEach(b => {
+                        b.disabled = true;
+                        b.style.opacity = '0.4';
+                        b.style.cursor = 'not-allowed';
+                        b.title = "Formatting unavailable in Sahitya (Lyrics)";
+                    });
+                } else {
+                    // Enable Buttons
+                    allStyleBtns.forEach(b => {
+                        b.disabled = false;
+                        b.style.opacity = '1';
+                        b.style.cursor = 'pointer';
+                        b.title = b.dataset.originalTitle || "";  // Restore title if we saved it, else default
+                    });
+                }
+                return;
+            }
+
+            // Analyze styles across all selected spans
+            let allDots = new Set();
+            let allUnderlines = new Set();
+
+            selectedSpans.forEach(span => {
+                if (span.classList.contains('dot-a')) allDots.add('dot-a');
+                if (span.classList.contains('dot-b')) allDots.add('dot-b');
+                if (span.classList.contains('u-single')) allUnderlines.add('u-single');
+                if (span.classList.contains('u-double')) allUnderlines.add('u-double');
+                if (!span.classList.contains('dot-a') && !span.classList.contains('dot-b')) allDots.add('none');
+                if (!span.classList.contains('u-single') && !span.classList.contains('u-double')) allUnderlines.add('none');
+            });
+
+            // Highlight buttons only if ALL spans have the SAME style
+            clearStyleButtonHighlights();
+
+            // Check dots - if only one value and it's not 'none'
+            if (allDots.size === 1 && !allDots.has('none')) {
+                const dotStyle = [...allDots][0];
+                const dotBtn = document.querySelector('.btn-group button[data-style="' + dotStyle + '"]');
+                if (dotBtn) dotBtn.classList.add('style-active');
+            }
+
+            // Check underlines
+            if (allUnderlines.size === 1 && !allUnderlines.has('none')) {
+                const underlineStyle = [...allUnderlines][0];
+                const underlineBtn = document.querySelector('.btn-group button[data-style="' + underlineStyle + '"]');
+                if (underlineBtn) underlineBtn.classList.add('style-active');
+            }
+        }
+
+        function clearStyleButtonHighlights() {
+            document.querySelectorAll('.btn-group button').forEach(btn => {
+                btn.classList.remove('style-active');
+            });
+        }
+
+        // Modified button click handler for selection styling
+        function handleStyleButtonClick(styleName, btn) {
+            const sel = window.getSelection();
+
+            // If there's a selection, apply/remove style to selected text
+            if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+                applyStyleToSelection(styleName);
+                return;
+            }
+
+            // Otherwise, toggle for typing mode (original behavior)
+            toggleStyleMode(styleName, btn);
+        }
+
+        function applyStyleToSelection(styleName) {
+            const sel = window.getSelection();
+            if (!sel || sel.isCollapsed) return;
+
+            const range = sel.getRangeAt(0);
+
+            // 1. EXTRACT: Physically cut the selection out of the DOM.
+            // This splits any parent spans automatically.
+            const fragment = range.extractContents();
+
+            // 2. ANALYZE & MODIFY: Walk the fragment and apply/remove styles
+            // We need to know if we are ADDING or REMOVING.
+            // Heuristic: If fully selected text ALREADY has the style, we remove. Else add.
+            // Since we extracted, we check the fragment's children.
+
+            // Let's perform a dry run to check state? No, extraction is destructive.
+            // We must decide based on what we find.
+            // Goal: "Uniformity". If ANY part lacks style -> ADD. If ALL have style -> REMOVE.
+            // But checking that on a fragment is tricky. 
+            // SIMPLIFICATION: User asked for "toggle behavior".
+            // Let's default to ADD. But if the range was fully inside a style span, we want to remove.
+
+            // To handle this robustly without complex analysis:
+            // We just iterate all text nodes in fragment.
+            // For each text node, we wrap/unwrap based on "target state".
+
+            // PROBLEM: "Toggle" requires knowing previous state.
+            // Let's use the BUTTON state as truth? 
+            // If button is Active -> We are REMOVING.
+            // If button is Inactive -> We are ADDING.
+
+            let isRemoving = false;
+            const btn = document.querySelector(`.btn-group button[data-style="${styleName}"]`);
+            if (btn && btn.classList.contains('style-active')) {
+                isRemoving = true;
+            }
+
+            const dotStyles = ['dot-a', 'dot-b'];
+            const underlineStyles = ['u-single', 'u-double'];
+
+            function processNode(node) {
+                if (node.nodeType === 3) { // Text Node
+                    if (node.textContent.trim() === '') return node; // Skip empty
+
+                    // Find parent span in fragment (if any)
+                    let span = node.parentElement;
+                    let wrapper = span;
+
+                    // If parent is not a stylistic span, we might need to create one
+                    if (!span || span.tagName !== 'SPAN') {
+                        if (!isRemoving) {
+                            wrapper = document.createElement('span');
+                            wrapper.className = styleName;
+                            wrapper.textContent = node.textContent;
+                            return wrapper;
+                        } else {
+                            return node;
+                        }
+                    }
+
+                    // It has a parent span. Modify its classes.
+                    if (isRemoving) {
+                        span.classList.remove(styleName);
+                        // If no classes left, UNWRAP in next pass or just leave empty class (harmless)
+                    } else {
+                        // Adding
+                        // Handle conflicts
+                        if (dotStyles.includes(styleName)) {
+                            span.classList.remove('dot-a', 'dot-b');
+                        } else if (underlineStyles.includes(styleName)) {
+                            span.classList.remove('u-single', 'u-double');
+                        }
+                        span.classList.add(styleName);
+                    }
+
+                    // Cleanup: If span has no classes, replace with text? 
+                    // Hard to do active replacement while walking.
+                    // Just return the span, we clean up later if needed.
+                    return span; // Return the node that should represent this text
+                }
+
+                // Recurse for elements (if nested, though our structure is usually flat)
+                if (node.nodeType === 1) {
+                    // It's an element (Span usually). Process children?
+                    // Flat structure preferred.
+                    const children = Array.from(node.childNodes);
+                    children.forEach(child => {
+                        const processed = processNode(child);
+                        if (processed !== child) {
+                            node.replaceChild(processed, child);
+                        }
+                    });
+
+                    // Verify this node itself
+                    if (node.tagName === 'SPAN') {
+                        if (isRemoving) node.classList.remove(styleName);
+                        else {
+                            if (dotStyles.includes(styleName)) node.classList.remove('dot-a', 'dot-b');
+                            if (underlineStyles.includes(styleName)) node.classList.remove('u-single', 'u-double');
+                            node.classList.add(styleName);
+                        }
+                    }
+                    return node;
+                }
+                return node;
+            }
+
+            // SIMPLIFIED LOGIC:
+            // Walking the fragment is hard because 'extractContents' might give us
+            // <span>foo</span> bar <span>baz</span>
+            // We just want to apply style to everything in 'fragment'.
+
+            // Better approach:
+            // 1. Create a wrapper span with the target style?
+            // No, that nests spans <span><span>...</span></span>. We want flat.
+
+            // Let's use a TreeWalker on the Fragment.
+            const walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT, null, false);
+            const textNodes = [];
+            let tn;
+            while (tn = walker.nextNode()) textNodes.push(tn);
+
+            textNodes.forEach(node => {
+                const parent = node.parentNode; // Use parentNode (Fragment has no parentElement)
+
+                // If parent is already a span in the fragment (and is an ELEMENT)
+                if (parent && parent.nodeType === 1 && parent.tagName === 'SPAN') {
+                    // Modify parent classes
+                    if (isRemoving) {
+                        parent.classList.remove(styleName);
+                    } else {
+                        if (dotStyles.includes(styleName)) parent.classList.remove('dot-a', 'dot-b');
+                        if (underlineStyles.includes(styleName)) parent.classList.remove('u-single', 'u-double');
+                        parent.classList.add(styleName);
+                    }
+                    // Remove style attribute if any
+                    parent.removeAttribute('style');
+                } else {
+                    // Orphan text node in fragment -> Wrap it ONLY if adding
+                    if (!isRemoving) {
+                        const span = document.createElement('span');
+                        span.className = styleName;
+                        span.textContent = node.textContent;
+                        if (parent) parent.replaceChild(span, node);
+                    }
+                }
+            });
+
+            // 3. INSERT BACK
+            range.insertNode(fragment);
+
+            // 4. RESTORE SELECTION (Highlight what we just changed)
+            // This is tricky because fragment is gone.
+            // We can assume the range is collapsed at start now? No, insertNode puts it at start.
+            // We won't re-select for now to avoid complexity, user sees visual change.
+            sel.removeAllRanges();
+            // range.collapse(false); // Move to end? 
+        }
+
+
+        function addSection(name, type = 'normal') {
+            // No Talam prompt - just create section directly
+            const sec = document.createElement("div");
+            sec.dataset.type = type; // 'normal' or 'chitta'
+
+            // Section Header with Delete Button
+            // Section Header with Delete Button
+            // We interpret empty name as "needs placeholder"
+            sec.innerHTML = `
+                <div class="section-header">
+                    <span contenteditable="true" onkeydown="if(event.key==='Enter') event.preventDefault()">${name}</span>
+                    <button class="del-btn" onclick="removeSection(this)" title="Delete Section">✕</button>
+                </div>`;
+
+            document.getElementById("content").appendChild(sec);
+            activeSection = sec;
+
+            addRow();
+        }
+
+        function removeSection(btn) {
+            if (confirm("Remove this section?")) {
+                const sec = btn.closest("[data-parts]");
+                sec.remove();
+                if (activeSection === sec) activeSection = null;
+            }
+        }
+
+        function addRow() {
+            if (!activeSection) return;
+
+            const isChitta = activeSection.dataset.type === 'chitta';
+
+            // Wrapper for the row pair
+            const rowGroup = document.createElement("div");
+            rowGroup.className = "row-group";
+
+            // Swara row
+            const sw = document.createElement("div");
+            sw.className = "tala-row";
+            sw.style.display = "flex";
+
+            // Number Box Container
+            const numContainer = document.createElement("div");
+            numContainer.style.width = "40px";
+            numContainer.style.flexShrink = "0";
+
+            if (isChitta) {
+                numContainer.innerHTML = '<div></div>';
+            } else {
+                numContainer.innerHTML = `
+                <div style="display:flex; align-items:flex-start; padding-top:4px;">
+                   <button class="del-btn" onclick="toggleNumberBox(this)" style="font-size:12px; margin-right:2px; width:15px; text-align:center;" title="Clear Number">✕</button>
+                   <div class="num-box" contenteditable style="width:20px; text-align:center; border:1px solid #ccc; font-size:14px;"></div>
+                </div>`;
+            }
+            sw.appendChild(numContainer);
+
+            // Single Swara Line (no background bars)
+            const line = document.createElement("div");
+            line.className = "swara-line";
+            line.contentEditable = true;
+
+            sw.appendChild(line);
+            rowGroup.appendChild(sw);
+
+            // Sahitya row (Only if NOT Chitta)
+            if (!isChitta) {
+                const sa = document.createElement("div");
+                sa.className = "tala-row";
+                sa.style.display = "flex";
+
+                const spacer = document.createElement("div");
+                spacer.style.width = "40px";
+                spacer.style.flexShrink = "0";
+                sa.appendChild(spacer);
+
+                const saLine = document.createElement("div");
+                saLine.className = "sahitya-line";
+                saLine.contentEditable = true;
+
+                sa.appendChild(saLine);
+                rowGroup.appendChild(sa);
+            }
+
+            activeSection.appendChild(rowGroup);
+        }
+
+
+
+        function toggleNumberBox(btn) {
+            const container = btn.parentElement;
+            const box = container ? container.querySelector('.num-box') : null;
+
+            if (box) {
+                if (box.classList.contains('deleted')) {
+                    // Restore
+                    box.classList.remove('deleted');
+                    btn.innerText = "✕";
+                    btn.title = "Clear Number";
+                    btn.style.color = "red";
+                    box.focus(); // Focus to type
+                } else {
+                    // Delete
+                    box.innerText = "";
+                    box.dataset.raw = "";
+                    box.classList.add('deleted');
+                    btn.innerText = "+";
+                    btn.title = "Add Number Box";
+                    btn.style.color = "green";
+                }
+            }
+        }
+
+        /* ===== Marks (Undo Safe & Toggle) ===== */
+        function applyStyle(className) {
+            const sel = window.getSelection();
+            if (!sel.rangeCount) return;
+
+            let node = sel.anchorNode;
+            if (node.nodeType === 3) node = node.parentElement;
+
+            // Check if we are ALREADY inside a custom span
+            // We verify if it has ANY of our known classes
+            const knownClasses = ['u-single', 'u-double', 'dot-a', 'dot-b'];
+            // Check if current node implies we are inside a styled span
+            // We use closest('span') to find the wrapper
+            const el = node.closest('span');
+
+            // Should we toggle on the existing span?
+            if (el && knownClasses.some(c => el.classList.contains(c))) {
+                // Yes, we are modifying an existing style span
+
+                // CONFLICT LOGIC: Enforce one from each group
+                const conflicts = {
+                    'u-single': 'u-double',
+                    'u-double': 'u-single',
+                    'dot-a': 'dot-b',
+                    'dot-b': 'dot-a'
+                };
+
+                // Toggle the requested class
+                if (el.classList.contains(className)) {
+                    el.classList.remove(className);
+                } else {
+                    // Add new class
+                    el.classList.add(className);
+                    // Remove conflicting class if present
+                    if (conflicts[className] && el.classList.contains(conflicts[className])) {
+                        el.classList.remove(conflicts[className]);
+                    }
+                }
+
+                // If no classes left, unwrap? (Optional cleanup)
+                if (el.classList.length === 0) {
+                    const txt = el.innerText;
+                    // Replace el with text
+                    el.outerHTML = txt;
+                }
+
+                // Trigger validation on the cell - REMOVED
+                return;
+            }
+
+            // Create NEW span
+            if (sel.isCollapsed) return;
+            const text = sel.toString();
+            const html = `<span class="${className}">${text}</span>`;
+            document.execCommand("insertHTML", false, html);
+
+            // Trigger validation - REMOVED
+        }
+
+        /* ===== VALIDATION ENGINE (ROW TOTALS) ===== */
+        const segmenter = new Intl.Segmenter('te', { granularity: 'grapheme' });
+
+        function checkRowTotals() {
+            if (!activeSection) return true;
+
+            // Get all 'tala-row' in active section that are NOT sahitya
+            // Actually we built structure: row-group -> tala-row (swara) + tala-row (sahitya)
+            // We need to check Swara row of each group.
+
+            const partCount = parseInt(activeSection.dataset.parts);
+            const groups = activeSection.querySelectorAll('.row-group');
+
+            for (let i = 0; i < groups.length; i++) {
+                const group = groups[i];
+                // We check Swara row of each group.
+                const swaraLine = group.querySelector('.swara-line');
+                if (!swaraLine) continue;
+
+                // Validate the WHOLE line duration
+                let rowSum = getCellDuration(swaraLine);
+
+                // Allow float tolerance + Multiples check
+                // User requirement: 
+                // Adi (8) -> 8 or 16
+                // Roopaka (3) -> 3 or 6 or 12
+                // Khanda (5) -> 5 or 10
+                // Misra (7) -> 7 or 14
+
+                const validTotals = [partCount]; // Always allow base
+                validTotals.push(partCount * 2); // Double scale
+                if (partCount === 3) validTotals.push(12); // Special for Roopaka 12?
+
+                // Check if rowSum matches ANY valid total (with tolerance)
+                const isValid = validTotals.some(v => Math.abs(rowSum - v) < 0.05);
+
+                if (!isValid) {
+                    const ok = confirm(`Row Check: \nTotal Duration: ${rowSum.toFixed(2)} \nExpected: ${validTotals.join(" or ")} \n\nIgnore and continue?`);
+                    if (!ok) return false; // Abort adding new row
+                }
+            }
+            return true;
+        }
+
+        function getCellDuration(cell) {
+            // Calculate duration recursively
+            let total = 0;
+            function processNode(n, mult = 1) {
+                if (n.nodeType === 3) { // Text
+                    const segs = segmenter.segment(n.textContent);
+                    for (const seg of segs) {
+                        const char = seg.segment;
+                        if (char.trim() === '') continue;
+                        let weight = 1;
+                        if (char === ';') weight = 2;
+                        total += weight * mult;
+                    }
+                } else if (n.nodeType === 1) { // Element
+                    let newMult = mult;
+                    if (n.classList.contains('u-single')) newMult = 0.5;
+                    if (n.classList.contains('u-double')) newMult = 0.25;
+                    // Strict override logic
+                    if (n.classList.contains('u-double')) newMult = 0.25;
+                    else if (n.classList.contains('u-single')) newMult = 0.5;
+
+                    n.childNodes.forEach(child => processNode(child, newMult));
+                }
+            }
+            cell.childNodes.forEach(node => processNode(node));
+            return total;
+        }
+
+        /* ===== DOC ===== */
+        function downloadDoc() {
+            // Get current content
+            const content = document.getElementById('sheet').innerHTML;
+
+            // Construct HTML for Word (docx)
+            // Word 2007 (html-docx target) HATES Flexbox. We must use TABLES or BLOCKS for export CSS.
+            const docContent = `
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <style>
+                        body { font-family: 'Noto Serif Telugu', 'Arial Unicode MS', sans-serif; font-size: 14pt; }
+                        
+                        /* Basic Reset */
+                        .sheet { width: 100%; }
+                        
+                        /* Title */
+                        .title { text-align: center; font-size: 24pt; font-weight: bold; margin-bottom: 10pt; }
+                        .composer { text-align: right; font-size: 14pt; font-weight: bold; color: #444; margin-bottom: 20pt; }
+                        
+                        /* Meta Grid -> Table */
+                        .meta-grid { display: table; width: 100%; margin-bottom: 20pt; }
+                        .meta-col { display: table-cell; width: 50%; vertical-align: top; }
+                        .meta-row { display: block; margin-bottom: 5pt; } 
+                        .meta-label { font-weight: bold; }
+                        .meta-val { border-bottom: 1px dotted #000; display: inline-block; min-width: 100pt; }
+
+                        /* Section Header -> Table/Block */
+                        .section-header { 
+                            margin-top: 50pt; 
+                            margin-bottom: 20pt;
+                            background: #eee; 
+                            font-weight: bold; 
+                            padding: 10pt; /* More padding too */
+                            border: 1px solid #ddd;
+                            display: block; /* Fallback */
+                            text-align: center; /* Center headers in doc? User didn't ask but looks better. Let's stick to default (left) unless asked. */
+                        }
+                        /* Hide ALL buttons in print (Delete, Cancel, Add placeholders) */
+                        button { display: none !important; }
+                        /* Also hide specific UI controls if valid */
+                        .del-btn, .ui-control { display: none !important; }
+                        
+                        /* Rows - Table Layout for Alignment */
+                        .row-group { margin-bottom: 15pt; page-break-inside: avoid; }
+                        
+                        .tala-row { 
+                            display: table; 
+                            width: 100%;
+                            margin-bottom: 2pt;
+                             /* Ensure row doesn't collapse */
+                             min-height: 20pt;
+                        }
+                        
+                        /* The Number/Spacer Column */
+                        .tala-row > div:first-child {
+                            display: table-cell;
+                            width: 40pt; /* Using pt for Word stability (approx 50px) */
+                            min-width: 40pt;
+                            vertical-align: top;
+                            text-align: center; /* Center the number in the gutter */
+                            padding-right: 5pt;
+                        }
+                        
+                        /* The Content Column */
+                        .tala-row > div:last-child {
+                            display: table-cell;
+                            vertical-align: top;
+                            width: auto; /* Rest of page */
+                        }
+
+                        /* Number Box Styling for Print */
+                        .num-box {
+                             border: 1px solid #999;
+                             display: inline-block;
+                             min-width: 18pt;
+                             text-align: center;
+                             margin: 0 auto; /* Center in cell */
+                             font-weight: bold;
+                             font-size: 10pt;
+                        }
+                        
+                        /* Swara Line - Monospace-ish spacing? */
+                        .swara-line { 
+                            font-family: 'Arial Unicode MS', sans-serif; 
+                            font-weight: bold; 
+                            font-size: 14pt;
+                            color: #000;
+                            line-height: 1.5;
+                        }
+                        
+                        .sahitya-line { 
+                            font-family: 'Noto Serif Telugu', sans-serif; 
+                            font-size: 12pt; 
+                            color: #444; 
+                            line-height: 1.5;
+                        }
+                        
+                        /* Styling classes */
+                        .u-single { border-bottom: 1px solid black; }
+                        .u-double { border-bottom: 3px double black; }
+                        .dot-a::before { content: '\\02D9'; position: relative; top: -0.4em; font-size: 0.8em; } /* Dot above hack? Or just existing char */
+                        /* Actually our dot-a is style based? No, it preserves the char? 
+                           Wait, our dot buttons INSERT chars (Ṡ). 
+                           So CSS shouldn't need to do much unless we used span classes for visuals. 
+                           Our validStyles: .dot-a { ... } 
+                           Let's check editor styles. 
+                        */
+                        
+                        /* We defined classes for UNDERLINE, but Dot was often char based in recent Chat? 
+                           Wait, line 1435 checks .dot-a class. 
+                           If we use CSS for dots, we need that CSS here.
+                           Let's import the page styles too, but override layout.
+                        */
+                    </style>
+                    <!-- Import Original Styles for specifics, but Override Layouts below -->
+                    ${document.querySelector('style').outerHTML}
+                    <style>
+                        /* OVERRIDES FOR WORD */
+                        .section-header { display: block; }
+                        .meta-grid { display: table; }
+                        .meta-col { display: table-cell; }
+                        
+                        /* Remove Input Placeholders */
+                        .composer:empty::before, .section-header span:empty::before { content: ""; }
+                        
+                        /* Hide GUI elements */
+                        .del-btn { display: none; }
+                        #suggestionPopup { display: none; }
+                    </style>
+                </head>
+                <body>
+                    ${content}
+                </body>
+                </html>
+            `;
+
+            saveAs(htmlDocx.asBlob(docContent), "kruti.docx");
+        }
+    </script>
+
+</body>
+
+</html>
